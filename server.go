@@ -50,7 +50,7 @@ const (
 	wgServerCIDR          = wgServerAddr + "/24"
 	defaultInternalWGPort = 56001
 	wgMTU                 = 1280
-	keepalive             = 25
+	keepalive             = 10
 )
 
 // dns — DNS-серверы, прописываемые в WireGuard-конфиг клиента.

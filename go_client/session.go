@@ -21,9 +21,9 @@ const (
 	workerSendBuf      = 128
 	sessionReadTimeout = 30 * time.Minute // Increased from 60s to 30min
 	readBufSize        = 1600
-	socketBufSize      = 625 * 1024
+	socketBufSize      = 4 * 1024 * 1024
 	keepaliveByte      = 0xFF // DTLS-level keepalive marker
-	keepaliveInterval  = 15 * time.Second
+	keepaliveInterval  = 7 * time.Second
 )
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
@@ -288,7 +288,7 @@ func RunSession(
 
 	hctx, hcancel := context.WithTimeout(
 		sessCtx,
-		20*time.Second,
+		45*time.Second,
 	)
 
 	log.Printf(
