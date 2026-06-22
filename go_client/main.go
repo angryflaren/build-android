@@ -56,6 +56,7 @@ func drainCaptchaResult() {
 	}
 }
 
+
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 

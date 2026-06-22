@@ -179,10 +179,12 @@ func WorkerGroup(
 					}
 					errStr := sessErr.Error()
 					errStrLower := strings.ToLower(errStr)
+					
+					turnAllocAttrMissing := strings.Contains(errStrLower, "turn allocate") && strings.Contains(errStrLower, "attribute not found")
+					// Добавлено распознавание потери пакетов (retransmissions)
+					turnRetransmissionFailed := strings.Contains(errStrLower, "all retransmissions failed")
 
-					turnAllocAttrMissing := strings.Contains(errStrLower, "turn allocate") &&
-						strings.Contains(errStrLower, "attribute not found")
-					turnCredRefreshNeeded := turnAllocAttrMissing ||
+					turnCredRefreshNeeded := turnAllocAttrMissing || turnRetransmissionFailed ||
 						strings.Contains(errStrLower, "turn allocate auth") ||
 						strings.Contains(errStrLower, "invalid credential") ||
 						strings.Contains(errStrLower, "stale nonce") ||
@@ -191,23 +193,27 @@ func WorkerGroup(
 						strings.Contains(errStrLower, "turn квота") ||
 						strings.Contains(errStrLower, "quota")
 
-					if strings.Contains(errStrLower, "rate limit") ||
-						strings.Contains(errStrLower, "flood control") ||
-						strings.Contains(errStrLower, "ip mismatch") ||
-						strings.Contains(errStrLower, "error 29") {
+					if strings.Contains(errStrLower, "rate limit") || strings.Contains(errStrLower, "flood control") ||
+						strings.Contains(errStrLower, "ip mismatch") || strings.Contains(errStrLower, "error 29") {
 						errStr += " (ошибка со стороны ВК)"
 					}
 
-					if strings.Contains(errStr, "хеш мёртв") ||
-						strings.Contains(errStr, "FATAL_AUTH") {
+					if strings.Contains(errStr, "хеш мёртв") || strings.Contains(errStr, "FATAL_AUTH") {
 						log.Printf("[ВОРКЕР #%d] Фатальная ошибка: %s", wid, errStr)
 						return
 					}
 
 					attempt++
+					retryFast := false
+
 					if turnAllocAttrMissing {
-						log.Printf("[ВОРКЕР #%d] [TURN] Allocate вернул неполный ответ, обновляем TURN-креды и повторяем (попытка %d): %s", wid, attempt, errStr)
+						log.Printf("[ВОРКЕР #%d] [TURN] Allocate вернул неполный ответ, обновляем TURN-креды и повторяем быстро (попытка %d): %s", wid, attempt, errStr)
 						refreshCreds("TURN Allocate attribute-not-found")
+						retryFast = true
+					} else if turnRetransmissionFailed {
+						log.Printf("[ВОРКЕР #%d] [TURN] Ошибка сети (retransmissions failed), обновляем TURN-креды и повторяем быстро (попытка %d): %s", wid, attempt, errStr)
+						refreshCreds("TURN retransmissions-failed")
+						retryFast = true
 					} else if turnCredRefreshNeeded {
 						log.Printf("[ВОРКЕР #%d] [TURN] Ошибка allocation/кредов, обновляем TURN-креды и повторяем (попытка %d): %s", wid, attempt, errStr)
 						refreshCreds("TURN allocation error")
@@ -216,11 +222,27 @@ func WorkerGroup(
 					}
 
 					// Если ошибка STUN (credentials invalid), воркер не сможет переподключиться. Завершаем.
-					isStunDeath := strings.Contains(errStrLower, "error 29") ||
-						strings.Contains(errStrLower, "cannot create socket")
-
+					isStunDeath := strings.Contains(errStrLower, "error 29") || strings.Contains(errStrLower, "cannot create socket")
 					if isStunDeath {
 						log.Printf("[ВОРКЕР #%d] Невосстановимая TURN/STUN ошибка, завершение: %s", wid, errStr)
+						return
+					}
+
+					if ctx.Err() != nil {
+						return
+					}
+
+					var retryDelay time.Duration
+					if retryFast {
+						// Быстрый ретрай (1-3 секунды) для временных сетевых сбоев TURN Allocation
+						retryDelay = time.Duration(1+rand.Intn(3)) * time.Second
+					} else {
+						retryDelay = time.Duration(5+rand.Intn(11)) * time.Second
+					}
+
+					select {
+					case <-time.After(retryDelay):
+					case <-ctx.Done():
 						return
 					}
 				}
