@@ -20,6 +20,8 @@ jobs:
       ANDROID_BUILD_TOOLS: "35.0.0"
       ANDROID_NDK_VERSION: "27.2.12479018"
       SERVER_BINARY_NAME: "server"
+      # Явно задаем путь, чтобы он был доступен в контексте ${{ env.ANDROID_HOME }}
+      ANDROID_HOME: "/usr/local/lib/android/sdk" 
 
     steps:
       - name: Checkout repository
@@ -30,21 +32,34 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: "gradle"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Cache Android SDK components
+        id: cache-android-sdk
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_HOME }}/platforms/android-${{ env.ANDROID_COMPILE_SDK }}
+            ${{ env.ANDROID_HOME }}/build-tools/${{ env.ANDROID_BUILD_TOOLS }}
+            ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          key: ${{ runner.os }}-android-sdk-compile${{ env.ANDROID_COMPILE_SDK }}-tools${{ env.ANDROID_BUILD_TOOLS }}-ndk${{ env.ANDROID_NDK_VERSION }}
+
       - name: Install Android SDK packages
+        if: steps.cache-android-sdk.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-
           sdkmanager \
             "platforms;android-${ANDROID_COMPILE_SDK}" \
             "build-tools;${ANDROID_BUILD_TOOLS}" \
             "ndk;${ANDROID_NDK_VERSION}"
 
-          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+      - name: Export NDK Home
+        shell: bash
+        run: echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -100,7 +115,6 @@ jobs:
 
           mkdir -p app/src/main/assets
 
-          # Android deploy code expects this exact asset name.
           cp build/server/wdtt-server-linux-amd64 app/src/main/assets/${SERVER_BINARY_NAME}
           chmod +x app/src/main/assets/${SERVER_BINARY_NAME}
 
@@ -193,7 +207,17 @@ jobs:
 
           rm -f release.keystore local.properties signing.env
 
-          keytool -genkeypair             -v             -keystore release.keystore             -storetype PKCS12             -storepass "$KEYSTORE_PASSWORD"             -keypass "$KEY_PASSWORD"             -alias "$KEY_ALIAS"             -keyalg RSA             -keysize 4096             -validity 10000             -dname "CN=WDTT,O=WDTT,C=LV"
+          keytool -genkeypair \
+            -v \
+            -keystore release.keystore \
+            -storetype PKCS12 \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -alias "$KEY_ALIAS" \
+            -keyalg RSA \
+            -keysize 4096 \
+            -validity 10000 \
+            -dname "CN=WDTT,O=WDTT,C=LV"
 
           {
             echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
@@ -208,9 +232,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # No local.properties is created here, so Gradle produces unsigned release APKs.
-          # The workflow signs them manually in the next step using apksigner.
           ./gradlew clean :app:assembleRelease --stacktrace
 
       - name: Sign release APKs manually
@@ -233,8 +254,6 @@ jobs:
 
           if [ ${#unsigned_apks[@]} -eq 0 ]; then
             echo "No unsigned release APKs found"
-            echo "Available APK outputs:"
-            find app/build/outputs/apk -type f -name "*.apk" -print || true
             exit 1
           fi
 
@@ -247,14 +266,24 @@ jobs:
             "$ZIPALIGN" -p -f 4 "$apk" "$aligned"
 
             echo "== Sign $aligned =="
-            "$APKSIGNER" sign               --ks release.keystore               --ks-key-alias "$KEY_ALIAS"               --ks-pass "pass:$KEYSTORE_PASSWORD"               --key-pass "pass:$KEY_PASSWORD"               --v1-signing-enabled true               --v2-signing-enabled true               --v3-signing-enabled true               --v4-signing-enabled false               --out "$signed"               "$aligned"
+            "$APKSIGNER" sign \
+              --ks release.keystore \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass "pass:$KEYSTORE_PASSWORD" \
+              --key-pass "pass:$KEY_PASSWORD" \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --v4-signing-enabled false \
+              --out "$signed" \
+              "$aligned"
 
             echo "== Verify $signed =="
-            "$APKSIGNER" verify               --verbose               --print-certs               "$signed"
+            "$APKSIGNER" verify \
+              --verbose \
+              --print-certs \
+              "$signed"
           done
-
-          echo "Signed APKs:"
-          ls -lh build/signed-apk/*-signed.apk
 
       - name: Collect build outputs
         shell: bash
@@ -265,15 +294,9 @@ jobs:
           mkdir -p build/artifacts/server
           mkdir -p build/artifacts/go-client
 
-          echo "== Signed APK outputs =="
-          find build/signed-apk -type f -name "*-signed.apk" -print -exec ls -lh {} \;
-
           cp build/signed-apk/*-signed.apk build/artifacts/apk/
           cp build/server/* build/artifacts/server/
           cp build/go-client/* build/artifacts/go-client/
-
-          echo "== Final artifacts =="
-          find build/artifacts -type f -exec ls -lh {} \;
 
       - name: Upload release APK artifact
         uses: actions/upload-artifact@v4
